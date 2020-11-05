@@ -1,85 +1,81 @@
 #include "dns_parser.h"
 #include <string.h>
-#include <stdlib.h>
-#include <arpa/inet.h>
+
+#define MAX_NAME_LENGTH 256
+#define MAX_RESPONSE    12
+
+// Значения поля TYPE в секциях Answer, Authority и Additional
+enum DNS_TYPE { A = 1, NS, MD, MF, CNAME, SOA, MB, MG, MR, NULL_, WKS, PTR, HINFO, MINFO, MX, TXT, AAAA = 28 };
+
+// Значения поля CLASS в секциях Answer, Authority и Additional
+enum DNS_CLASS { IN = 1, CS, CH, HS };
+
+// Структура заголовка пакета DNS
+typedef struct {
+    const uint16_t id;
+    const uint8_t rcode : 4;
+    const uint8_t z : 3;
+    const uint8_t ra : 1;
+    const uint8_t rd : 1;
+    const uint8_t tc : 1;
+    const uint8_t aa : 1;
+    const uint8_t opcode : 4;
+    const uint8_t qr : 1;
+    const uint16_t qdcount;
+    const uint16_t ancount;
+    const uint16_t nscount;
+    const uint16_t arcount;
+} DNS_header;
+
+// Структура типа данных SOA в поле rdata
+typedef struct {
+    uint32_t serial;
+    uint32_t refresh;
+    uint32_t retry;
+    uint32_t expire;
+    uint32_t ttl;
+    char mname[MAX_NAME_LENGTH];
+    char rname[MAX_NAME_LENGTH];
+} DNS_type_SOA;
+
+// Структура секций Answer, Authority и Additional
+#pragma pack(push, 1)
+typedef struct {
+    uint16_t type;
+    uint16_t class_;
+    uint32_t ttl;
+    uint16_t rdlength;
+    union {
+        uint8_t rdata[MAX_NAME_LENGTH];
+        DNS_type_SOA soa;
+    };
+    char answer_name[MAX_NAME_LENGTH];
+} DNS_response;
+#pragma pack(pop)
+
+typedef struct {
+    DNS_header header;
+    DNS_response response[MAX_RESPONSE];
+} DNS_package;
 
 /**
 @brief Парсер меток для определения полей name, rdata
 @param data - заполняемое поле, offset - смещение, quest_name - поле QNAME секции Question, packet - пакет
 @return offset - OK, -1 - Error
 */
-int16_t
-dns_parse_label(char *data, int16_t offset, uint16_t dns_length, char *quest_name, const unsigned char *packet) {
-
-    u_int16_t cur_name_length = 0;
-    uint8_t answer_name_length = strlen(quest_name) + 1;
-    const uint8_t header_length = 12;
-    uint16_t field;
-    int16_t tmp_offset = offset;
-
-    while (packet[tmp_offset]) {
-        field = packet[tmp_offset + 1];
-        field += (packet[tmp_offset] << 8u);
-        // Если первые два бита равны 00 - обычная метка, следующие 6 бит определяют длину метки
-        if ((packet[tmp_offset] & 0xc0u) == 0x00) {
-            // Определяем значение поля name, часто совпадает с таким же полем в секции Answer
-            if (packet[tmp_offset] + offset > dns_length)
+int16_t dns_parse_label(const uint8_t* data, uint16_t data_len, int16_t offset) {
+    // Если первые два бита равны 00 - обычная метка, следующие 6 бит определяют длину метки
+    if((data[offset] & 0xc0u) == 0x00) {
+        while(data[offset] && ((data[offset] & 0xc0u) != 0xc0u)) {
+            if(offset++ > data_len)
                 return -1;
-            memcpy(data + cur_name_length, &packet[tmp_offset + 1], packet[tmp_offset]);
-            cur_name_length += packet[tmp_offset];
-            data[cur_name_length++] = '.';
-            tmp_offset += packet[tmp_offset] + 1;
-            offset = tmp_offset;
-            // Если метка c0, но содержит частично quest_name или выходит за его пределы
-        } else if (field != 0xc00c) {
-            uint16_t label_offset = (field & 0x3fffu);
-            if (label_offset > dns_length)
-                return -1;
-            // Если метка выходит за пределы quest_name, собираем data
-            if (label_offset > header_length + answer_name_length) {
-                uint16_t i = label_offset;
-                while (packet[i]) {
-                    if ((packet[i] & 0xc0u)) {
-                        label_offset = packet[i + 1] + (packet[i] << 8u);
-                        label_offset &= 0x3fffu;
-                        i = label_offset;
-
-                    }
-                    if (i > dns_length || packet[i] + offset > dns_length)
-                        return -1;
-                    memcpy(data + cur_name_length, &packet[i + 1], packet[i]);
-                    cur_name_length += packet[i];
-                    data[cur_name_length++] = '.';
-                    i += packet[i] + 1;
-                }
-            }
-                // Если метка ссылается на часть quest_name
-            else {
-                memcpy(data + cur_name_length, &quest_name[label_offset - header_length],
-                       answer_name_length - label_offset + header_length);
-                cur_name_length += answer_name_length - label_offset + header_length;
-            }
-            tmp_offset += 2;
-            break;
-        }
-            // Если метка содержит полный quest_name
-        else {
-            memcpy(data + cur_name_length, quest_name, answer_name_length);
-            cur_name_length += answer_name_length;
-            break;
         }
     }
-    data[cur_name_length - 1] = 0;
-    // Если не было метки 0xc0
-    if (!packet[offset]) {
-        offset++;
-    } else if (tmp_offset <= offset) {
+    if((data[offset] & 0xc0u) == 0xc0u) {
         offset += 2;
-    } else {
-        offset = tmp_offset;
     }
-    if (offset > dns_length)
-        offset = -1;
+    else
+        return -1;
     return offset;
 }
 
@@ -88,13 +84,15 @@ dns_parse_label(char *data, int16_t offset, uint16_t dns_length, char *quest_nam
 @param data  - данные метки
 @return 0 - OK, -1 - Error
  */
-int dns_check_label(char *data) {
-    if (!*data)
+int dns_check_label(char* data) {
+    if(!*data)
         return -1;
-    char letter;
-    while ((letter = *data++)) {
-        if (!(letter == '-' || (letter >= 'A' && letter <= 'Z') || (letter >= 'a' && letter <= 'z') ||
-              ((letter >= '0' && letter <= '9')) || letter == '.' || letter == ':'))
+    char letter = *data;
+    if(!((letter >= 'A' && letter <= 'Z') || (letter >= 'a' && letter <= 'z')))
+        return -1;
+    while((letter = *(++data))) {
+        if(!(letter == '-' || (letter >= 'A' && letter <= 'Z') || (letter >= 'a' && letter <= 'z') ||
+             ((letter >= '0' && letter <= '9')) || letter == '.'))
             return -1;
     }
 
@@ -106,144 +104,90 @@ int dns_check_label(char *data) {
 @param response - одна из трех секций, offset - смещение, quest_name - поле QNAME секции Question, packet - пакет
 @return offset - OK, -1 - Error
 */
-int16_t dns_parse_answer(DNS_response *response, int16_t offset, uint16_t dns_length, char *quest_name,
-                         const unsigned char *packet) {
+int16_t dns_parse_answer(const uint8_t* data, uint16_t data_len, uint8_t* ip, uint8_t* ip_len, int16_t offset) {
     uint16_t field = 0;
-    int16_t tmp_offset;
-    offset = dns_parse_label(response->answer_name, offset, dns_length, quest_name, packet);
-    if (offset == -1)
+    offset = dns_parse_label(data, data_len, offset);
+    if(offset == -1)
         return -1;
     int16_t k = offset;
-
+    DNS_response response;
     // Значения полей структуры Response, кроме поля name
-    for (; offset < k + 10; offset += 2) {
-        field = packet[offset + 1];
-        field += (packet[offset] << 8u);
-        memcpy(((uint8_t *) response) + offset - k, &field, 2);
+    for(; offset < k + 10; offset += 2) {
+        field = data[offset + 1];
+        field += (data[offset] << 8u);
+        memcpy((uint8_t*) (&response) + offset - k, &field, 2);
     }
-    response->ttl = ((response->ttl << 16u) & 0xffff0000u) | ((response->ttl >> 16u) & 0x0000ffffu);
-    if (response->rdlength + offset > dns_length)
+    response.ttl = ((response.ttl << 16u) & 0xffff0000u) | ((response.ttl >> 16u) & 0x0000ffffu);
+    if(response.rdlength + offset > data_len)
         return -1;
-
-    // Union для определения ip в типах: A, AAAA
-    union {
-        struct in_addr ipv4;
-        struct in6_addr ipv6;
-        struct {
-            uint8_t byte[16];
-        };
-    } ip;
-
-    tmp_offset = offset;
-    switch (response->type) {
-        case A :
-            if (response->rdlength != 4)
-                response->rdlength = 4;
-            for (int i = 0; i < response->rdlength; i++) {
-                ip.byte[i] = packet[offset + i];
-            }
-            inet_ntop(AF_INET, &(ip.ipv4), response->rdata, INET_ADDRSTRLEN);
+    switch(response.type) {
+        case A:
+            if(response.rdlength != 4)
+                response.rdlength = 4;
+            *ip_len = response.rdlength;
+            memcpy(ip, &data[offset], *ip_len);
             break;
         case AAAA:
-            if (response->rdlength != 16)
-                response->rdlength = 16;
-            for (int i = 0; i < response->rdlength; i++) {
-                ip.byte[i] = packet[offset + i];
-            }
-            inet_ntop(AF_INET6, &(ip.ipv6), response->rdata, INET6_ADDRSTRLEN);
+            if(response.rdlength != 16)
+                response.rdlength = 16;
+            *ip_len = response.rdlength;
+            memcpy(ip, &data[offset], *ip_len);
             break;
-//      case TXT:
-//      case NS:
-        case CNAME:
-        case PTR:
-        case MX:
-            if (response->type == MX) // Пропущено поле preference
-            {
-                tmp_offset = offset + 2;
-            }
-            tmp_offset = dns_parse_label((char *) response->rdata, tmp_offset, dns_length, quest_name, packet);
-            if (tmp_offset == -1)
-                response->rdata[0] = '\0';
-            break;
-        case SOA: {
-            // Тип SOA содержит: имя сервера-источника, e-mail и служебные данные
-            //имя сервера-источника
-            tmp_offset = dns_parse_label((char *) response->soa.mname, offset, dns_length, quest_name, packet);
-            if (tmp_offset == -1)
-                response->soa.mname[0] = '\0';
-            // e-mail
-            tmp_offset = dns_parse_label((char *) response->soa.rname, tmp_offset, dns_length, quest_name, packet);
-            if (tmp_offset == -1)
-                response->soa.rname[0] = '\0';
-            break;
-        }
-// To be continued...
-//        case MD:
-//        case MF:
-//        case MB:
-//        case MG:
-//        case MR:
-//        case NULL_:
-//        case WKS:
-//        case HINFO:
-//        case MINFO:
         default:
             break;
     }
-    offset += response->rdlength;
+    offset += response.rdlength;
     return offset;
 }
 
-DNS *dns_handle(const unsigned char *packet, uint16_t dns_length, DNS *dns) {
+DNS* dns_handle(const unsigned char* data, uint16_t data_len, DNS* dns) {
 
-    uint16_t field = 0;
+    uint16_t field              = 0;
     const uint8_t header_length = 12;
-    int16_t offset = header_length;
-    char quest_name[MAX_NAME_LENGTH];
-
+    int16_t offset              = header_length;
+    DNS_header dns_header;
     // Header
-    for (int i = 0; i < header_length; i += 2) {
-        field = packet[i + 1];
-        field += (packet[i] << 8u);
-        memcpy(((uint8_t *) &dns->header) + i, &field, 2);
+    for(int i = 0; i < header_length; i += 2) {
+        field = data[i + 1];
+        field += (data[i] << 8u);
+        memcpy(((uint8_t*) &dns_header) + i, &field, 2);
     }
-    if (!dns->header.qr || dns->header.rcode)
+    if(!dns_header.qr || dns_header.rcode)
         return NULL;
     // После секции Header следует секция Question (e.g. mozilla.org),
     // необходимо дойти до секции Answer
     // В 13 байте (начале секции Question) пакета указана длина первой части секции Question
     // e.g. mozilla
     // Двигаемся до конца секции Question
-    while (packet[offset]) {
+    while(data[offset]) {
         // Определяем значение поля name, часто совпадает с таким же полем в секции Answer
         // Если метка некорректная или длина метки выходит за пределы пакета
-        if (((packet[offset] & 0xc0u) != 0xc0 && (packet[offset] & 0xc0u) != 0x00) ||
-            (packet[offset] & 0x3fu + offset) > dns_length || offset - header_length > dns_length)
+        if(((data[offset] & 0xc0u) != 0xc0 && (data[offset] & 0xc0u) != 0x00) ||
+           (data[offset] & 0x3fu + offset) > data_len || offset - header_length > data_len)
             return NULL;
-        memcpy(quest_name + offset - header_length, &packet[offset + 1], packet[offset]);
-        quest_name[packet[offset] + offset - header_length] = '.';
-        offset += packet[offset] + 1;
+        memcpy(dns->name + offset - header_length, &data[offset + 1], data[offset]);
+        dns->name[data[offset] + offset - header_length] = '.';
+        offset += data[offset] + 1;
     }
-    quest_name[offset - header_length - 1] = 0;
+    dns->name[offset - header_length - 1] = 0;
     // Если некорректные символы в запросе
-    if (dns_check_label(quest_name))
+    if(dns_check_label(dns->name))
         return NULL;
     // Пропускаем поля qtype и qclass секции Question
     offset += 5;
     // Секции Answer, Authority и Additional
-    uint16_t count = dns->header.ancount + dns->header.nscount + dns->header.arcount;
-    if (count > MAX_RESPONSE)
+    uint16_t count = dns_header.ancount + dns_header.nscount + dns_header.arcount;
+    if(count > MAX_RESPONSE)
         count = MAX_RESPONSE;
-    for (int i = 0; i < count; i++) {
-        offset = dns_parse_answer(dns->response + i, offset, dns_length, quest_name, packet);
+    for(int i = 0; i < count; i++) {
+        offset = dns_parse_answer(data, data_len, dns->ip[i], dns->ip_length + i, offset);
         // Проверка корректности поля Name
         // Если некорректно обработан ответ
-        if (offset == -1) {
-            dns->response[i].rdata[0] = '\0';
+        if(offset == -1) {
+            memset(dns->ip + i, 0, sizeof(dns->ip));
             return dns;
         }
-        if (dns_check_label(dns->response[i].rdata)) {
-            dns->response[i].rdata[0] = '\0';
+        if(!(*dns->ip[i])) {
             i--;
             count--;
         }

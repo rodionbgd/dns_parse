@@ -7,7 +7,7 @@ set(SOURCE_FILES src/dns_parser.c
         src/dns_parser.h)
 add_library(dns_parse STATIC ${SOURCE_FILES})
 
-add_subdirectory(test)
+#add_subdirectory(test)
 
-#add_executable(${PROJECT_NAME} main.c)
-#target_link_libraries(${PROJECT_NAME} dns_parse pcap)
+add_executable(${PROJECT_NAME} main.c)
+target_link_libraries(${PROJECT_NAME} dns_parse pcap)
