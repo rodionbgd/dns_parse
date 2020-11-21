@@ -15,15 +15,15 @@ extern "C" {
 typedef struct {
     char name[MAX_NAME_LENGTH];
     uint8_t ip[MAX_RESPONSE][MAX_IP_LENGTH];
-    uint8_t ip_type[MAX_IP_LENGTH];
+    uint8_t ip_length[MAX_IP_LENGTH];
 } DNS;
 
 /**
 @brief Обработка пакета DNS
-@param packet - пакет DNS, dns_length - длина пакета DNS, dns - структура данных пакета DNS
-return 0 - OK, 1 - Error
+@param packet - пакет DNS
+return структура Dns, с параметрами пакета, иначе NULL
 */
-uint8_t dns_handle(const unsigned char* packet, uint16_t dns_length, DNS* dns);
+DNS* dns_handle(const unsigned char* packet, uint16_t dns_length, DNS* dns);
 
 #ifdef __cplusplus
 }
